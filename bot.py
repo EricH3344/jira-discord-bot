@@ -53,7 +53,15 @@ def resolve_project_key(input_key: Optional[str]) -> str:
 
     raise RuntimeError("No accessible Jira project found and no default is configured.")
 
-# Initialize Discord Bot
+
+def get_project_epics(project_key: str) -> list:
+    try:
+        jql = f'project = "{project_key}" AND type = Epic ORDER BY name'
+        epics = jira_client.search_issues(jql, maxResults=50)
+        return [(epic.key, epic.fields.summary) for epic in epics]
+    except Exception as e:
+        return []
+
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -72,7 +80,6 @@ async def on_ready():
 @bot.tree.command(name="jira_get", description="Fetch details of a Jira issue.")
 @app_commands.describe(issue_key="The Jira Key (e.g., PROJ-123)")
 async def jira_get(interaction: discord.Interaction, issue_key: str):
-    # CRITICAL: Defer response immediately to avoid the 3-second timeout rule
     await interaction.response.defer()
     
     try:
@@ -99,15 +106,34 @@ async def jira_get(interaction: discord.Interaction, issue_key: str):
 # ----------------------------------------------------
 # WRITE COMMAND: Create an Issue
 # ----------------------------------------------------
-@bot.tree.command(name="jira_create", description="Create a new Jira issue.")
-@app_commands.describe(project_key="Project Code or name (optional; accepts partial)", summary="Issue Title", description="Detailed summary", issuetype="Issue type (Task, Bug, Story)")
-async def jira_create(interaction: discord.Interaction, project_key: str = "", summary: str = "", description: str = "", issuetype: str = "Task"):
+@bot.tree.command(name="jira_create", description="Create a new Jira issue with optional fields.")
+@app_commands.describe(
+    summary="Issue Title",
+    project_key="Project Code or name (optional; accepts partial)",
+    description="Detailed summary",
+    issuetype="Issue type (Task, Bug, Story)",
+    epic_link="Epic key to link to (e.g., PROJ-100)",
+    labels="Comma-separated labels",
+    priority="Priority (Highest, High, Medium, Low, Lowest)",
+    assignee="Assignee username or email (optional)"
+)
+async def jira_create(
+    interaction: discord.Interaction,
+    summary: str,
+    project_key: str = DEFAULT_PROJECT_KEY,
+    description: str = "",
+    issuetype: str = "Task",
+    epic_link: str = "",
+    labels: str = "",
+    priority: str = "",
+    assignee: str = ""
+):
     await interaction.response.defer()
     
     try:
         resolved_key = resolve_project_key(project_key or None)
     except Exception as e:
-        await interaction.followup.send(f"Could not determine a Jira project. {e}")
+        await interaction.followup.send(f"❌ Could not determine a Jira project. {e}")
         return
 
     issue_dict = {
@@ -116,6 +142,25 @@ async def jira_create(interaction: discord.Interaction, project_key: str = "", s
         'description': description or "No description provided.",
         'issuetype': {'name': issuetype or 'Task'},
     }
+    
+    if epic_link:
+        issue_dict['customfield_10000'] = epic_link
+    
+    if labels:
+        label_list = [l.strip() for l in labels.split(',') if l.strip()]
+        if label_list:
+            issue_dict['labels'] = label_list
+    
+    if priority:
+        issue_dict['priority'] = {'name': priority}
+    
+    if assignee:
+        try:
+            users = jira_client.search_users(assignee)
+            if users:
+                issue_dict['assignee'] = {'name': users[0].name}
+        except Exception:
+            pass
     
     try:
         new_issue = jira_client.create_issue(fields=issue_dict)
@@ -126,9 +171,23 @@ async def jira_create(interaction: discord.Interaction, project_key: str = "", s
             url=f"{JIRA_URL}/browse/{new_issue.key}",
             color=discord.Color.green()
         )
+        
+        details = []
+        if epic_link:
+            details.append(f"Epic: {epic_link}")
+        if labels:
+            details.append(f"Labels: {labels}")
+        if priority:
+            details.append(f"Priority: {priority}")
+        if assignee:
+            details.append(f"Assignee: {assignee}")
+        
+        if details:
+            embed.add_field(name="Fields Applied", value="\n".join(details), inline=False)
+        
         await interaction.followup.send(embed=embed)
         
     except Exception as e:
-        await interaction.followup.send(f"Failed to create issue. Ensure the project and issue type are valid. ({e})")
+        await interaction.followup.send(f"❌ Failed to create issue. Check project, issue type, and optional fields. Error: {e}")
 
 bot.run(DISCORD_TOKEN)
